@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from 'recharts';
-import { Plus, X, TrendingUp, TrendingDown, Trash2, Search, BarChart3, Sparkles, Activity, Database } from 'lucide-react';
+import { Plus, X, TrendingUp, TrendingDown, Trash2, Search, BarChart3, Sparkles, Activity, Database, Camera, Image as ImageIcon, Sparkle, Wand2, Loader2, AlertCircle } from 'lucide-react';
 
 const STORAGE_KEY = 'cardledger:collection:v1';
 
@@ -68,6 +68,47 @@ const daysAgoISO = (n) => {
   return d.toISOString().slice(0, 10);
 };
 
+// ---------- image compression ----------
+// Compress an uploaded image to a max dimension and JPEG quality, returning a data URL.
+// Trading-card aspect ratio is portrait, so we fit within MAX_DIM on the longer side.
+const compressImage = (file, maxDim = 800, quality = 0.78) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        const scale = Math.min(1, maxDim / Math.max(width, height));
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        // JPEG keeps file size small; cards don't need transparency
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error('Compression failed'));
+              return;
+            }
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => reject(new Error('Read failed'));
+            r.readAsDataURL(blob);
+          },
+          'image/jpeg',
+          quality,
+        );
+      };
+      img.onerror = () => reject(new Error('Image load failed'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error('File read failed'));
+    reader.readAsDataURL(file);
+  });
+
 const computeMetrics = (card) => {
   const pp = (card.pricePoints || []).slice().sort((a, b) => new Date(a.date) - new Date(b.date));
   if (pp.length === 0) {
@@ -127,6 +168,7 @@ const buildDemoCards = () => {
     id: uid(),
     notes: '',
     parallel: '',
+    photo: null,
     ...overrides,
     pricePoints: points.map(([date, price, source]) => ({
       id: uid(),
@@ -167,7 +209,7 @@ const buildDemoCards = () => {
   ];
 };
 
-// ---------- storage (localStorage version) ----------
+// ---------- storage ----------
 const useCollection = () => {
   const [cards, setCards] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -190,7 +232,11 @@ const useCollection = () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ cards }));
     } catch (e) {
+      // Most likely the storage quota is exceeded due to too many photos
       console.error('Save failed', e);
+      alert(
+        'Storage is full — your browser limits how much we can save. Consider removing photos from older cards, or removing some cards.',
+      );
     }
   }, [cards, loaded]);
 
@@ -281,6 +327,88 @@ const Input = ({ label, value, onChange, type = 'text', placeholder, required, s
   </label>
 );
 
+// ---------- Photo picker (used in add form) ----------
+const PhotoPicker = ({ value, onChange }) => {
+  const fileRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-picking same file
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setErr('Please choose an image file');
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const dataUrl = await compressImage(file);
+      onChange(dataUrl);
+    } catch (e) {
+      setErr('Could not process that image — try another one');
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.2em] mb-1.5" style={{ color: COLORS.textDim, fontFamily: 'IBM Plex Sans' }}>
+        Photo (optional)
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleFile}
+        className="hidden"
+      />
+      {value ? (
+        <div className="flex items-center gap-3">
+          <img
+            src={value}
+            alt="Card preview"
+            className="w-16 h-22 object-cover rounded"
+            style={{ border: `1px solid ${COLORS.borderSoft}`, height: 88 }}
+          />
+          <div className="flex flex-col gap-1.5">
+            <Button onClick={() => fileRef.current?.click()} variant="ghost" size="sm" disabled={busy}>
+              <Camera size={12} className="inline mr-1" /> Replace
+            </Button>
+            <Button onClick={() => onChange(null)} variant="danger" size="sm" disabled={busy}>
+              <Trash2 size={12} className="inline mr-1" /> Remove
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => fileRef.current?.click()}
+          disabled={busy}
+          className="w-full py-3 rounded-md flex items-center justify-center gap-2 transition disabled:opacity-50"
+          style={{
+            background: COLORS.bg,
+            border: `1px dashed ${COLORS.border}`,
+            color: COLORS.textDim,
+            fontFamily: 'IBM Plex Sans',
+            fontSize: 13,
+          }}
+        >
+          <Camera size={14} />
+          {busy ? 'Processing…' : 'Take photo or choose file'}
+        </button>
+      )}
+      {err && (
+        <div className="text-xs mt-2" style={{ color: COLORS.red }}>
+          {err}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const Modal = ({ open, onClose, children, title }) => {
   if (!open) return null;
   return (
@@ -312,7 +440,48 @@ const AddCardForm = ({ onSubmit, onCancel }) => {
   const [f, setF] = useState({
     player: '', year: '', set: '', cardNumber: '', condition: 'Raw', parallel: '',
     purchasePrice: '', purchaseDate: todayISO(), currentValue: '', notes: '',
+    photo: null,
   });
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState(null);
+  const [scanInfo, setScanInfo] = useState(null); // { confidence, notes }
+
+  const runScan = async () => {
+    if (!f.photo) {
+      setScanError('Add a photo first');
+      return;
+    }
+    setScanning(true);
+    setScanError(null);
+    setScanInfo(null);
+    try {
+      const r = await fetch('/api/scan-card', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl: f.photo }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        throw new Error(data.error || 'Scan failed');
+      }
+      const c = data.card || {};
+      // Only overwrite empty fields — don't clobber what the user already typed
+      setF((prev) => ({
+        ...prev,
+        player: prev.player || c.player || '',
+        year: prev.year || (c.year ? String(c.year) : ''),
+        set: prev.set || c.set || '',
+        cardNumber: prev.cardNumber || c.cardNumber || '',
+        parallel: prev.parallel || c.parallel || '',
+        condition: prev.condition === 'Raw' && c.condition ? c.condition : prev.condition,
+        notes: prev.notes || c.notes || '',
+      }));
+      setScanInfo({ confidence: c.confidence || 'unknown', notes: c.notes || '' });
+    } catch (e) {
+      setScanError(e.message || 'Could not scan card');
+    }
+    setScanning(false);
+  };
 
   const submit = (e) => {
     e.preventDefault();
@@ -328,13 +497,71 @@ const AddCardForm = ({ onSubmit, onCancel }) => {
       purchasePrice: f.purchasePrice ? parseFloat(f.purchasePrice) : 0,
       purchaseDate: f.purchaseDate,
       notes: f.notes.trim(),
+      photo: f.photo,
       pricePoints: f.currentValue ? [{ id: uid(), date: todayISO(), price: parseFloat(f.currentValue), source: 'Initial' }] : [],
     };
     onSubmit(card);
   };
 
+  const confColor = scanInfo?.confidence === 'high' ? COLORS.green : scanInfo?.confidence === 'low' ? COLORS.red : COLORS.gold;
+
   return (
     <form onSubmit={submit} className="space-y-3">
+      <PhotoPicker value={f.photo} onChange={(photo) => { setF({ ...f, photo }); setScanInfo(null); setScanError(null); }} />
+
+      {/* AI scan button */}
+      {f.photo && (
+        <button
+          type="button"
+          onClick={runScan}
+          disabled={scanning}
+          className="w-full py-2.5 rounded-md flex items-center justify-center gap-2 transition disabled:opacity-50"
+          style={{
+            background: scanning ? COLORS.surface2 : 'rgba(212,160,76,0.12)',
+            border: `1px solid ${COLORS.gold}`,
+            color: COLORS.gold,
+            fontFamily: 'IBM Plex Sans',
+            fontSize: 13,
+            fontWeight: 600,
+            letterSpacing: '0.02em',
+          }}
+        >
+          {scanning ? (
+            <>
+              <Loader2 size={14} className="animate-spin" />
+              Reading card with AI…
+            </>
+          ) : (
+            <>
+              <Wand2 size={14} />
+              Scan card with AI
+            </>
+          )}
+        </button>
+      )}
+
+      {scanError && (
+        <div
+          className="px-3 py-2 rounded text-xs flex items-start gap-2"
+          style={{ background: 'rgba(204,107,92,0.1)', border: `1px solid rgba(204,107,92,0.3)`, color: COLORS.red, fontFamily: 'IBM Plex Sans' }}
+        >
+          <AlertCircle size={12} style={{ marginTop: 2, flexShrink: 0 }} />
+          <span>{scanError}</span>
+        </div>
+      )}
+
+      {scanInfo && !scanError && (
+        <div
+          className="px-3 py-2 rounded text-xs flex items-start gap-2"
+          style={{ background: 'rgba(123,168,122,0.08)', border: `1px solid ${confColor}40`, color: COLORS.textDim, fontFamily: 'IBM Plex Sans', lineHeight: 1.4 }}
+        >
+          <Sparkle size={12} style={{ color: confColor, marginTop: 2, flexShrink: 0 }} />
+          <span>
+            Filled in fields below — <span style={{ color: confColor, fontWeight: 600 }}>{scanInfo.confidence} confidence</span>. Review and edit before saving.
+          </span>
+        </div>
+      )}
+
       <Input label="Player" value={f.player} onChange={(v) => setF({ ...f, player: v })} placeholder="e.g. Shohei Ohtani" required />
       <div className="grid grid-cols-2 gap-3">
         <Input label="Year" value={f.year} onChange={(v) => setF({ ...f, year: v })} type="number" placeholder="2018" />
@@ -408,10 +635,34 @@ const AddPricePointForm = ({ onSubmit, onCancel }) => {
   );
 };
 
-const CardDetail = ({ card, onAddPricePoint, onDeletePricePoint, onDeleteCard, onClose }) => {
+// ---------- Photo lightbox ----------
+const PhotoLightbox = ({ src, onClose }) => {
+  if (!src) return null;
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.92)' }}
+      onClick={onClose}
+    >
+      <button
+        className="absolute top-4 right-4 p-2 rounded-full"
+        style={{ background: 'rgba(255,255,255,0.1)', color: COLORS.text }}
+        onClick={onClose}
+      >
+        <X size={20} />
+      </button>
+      <img src={src} alt="Card" className="max-w-full max-h-full rounded" style={{ objectFit: 'contain' }} />
+    </div>
+  );
+};
+
+const CardDetail = ({ card, onAddPricePoint, onDeletePricePoint, onDeleteCard, onUpdatePhoto, onClose }) => {
   const m = useMemo(() => computeMetrics(card), [card]);
   const [showAdd, setShowAdd] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [showLightbox, setShowLightbox] = useState(false);
+  const photoFileRef = useRef(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
 
   const chartData = useMemo(() => {
     return (card.pricePoints || [])
@@ -420,20 +671,79 @@ const CardDetail = ({ card, onAddPricePoint, onDeletePricePoint, onDeleteCard, o
       .map((p) => ({ date: p.date, price: p.price, label: fmtDate(p.date) }));
   }, [card.pricePoints]);
 
+  const handlePhotoChange = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setPhotoBusy(true);
+    try {
+      const dataUrl = await compressImage(file);
+      onUpdatePhoto(dataUrl);
+    } catch (err) {
+      alert('Could not process that image');
+    }
+    setPhotoBusy(false);
+  };
+
   return (
     <div className="space-y-5">
-      <div>
-        <div className="text-xs uppercase tracking-[0.2em] mb-1" style={{ color: COLORS.gold, fontFamily: 'Fraunces' }}>
-          {card.year} {card.set} {card.cardNumber && '· #' + card.cardNumber}
-        </div>
-        <div style={{ fontFamily: 'Fraunces, serif', fontSize: '26px', fontWeight: 700, color: COLORS.text, lineHeight: 1.1, letterSpacing: '-0.02em' }}>
-          {card.player}
-        </div>
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          <Pill tone="neutral" size="xs">{card.condition}</Pill>
-          {card.parallel && <Pill tone="gold" size="xs">{card.parallel}</Pill>}
+      <PhotoLightbox src={showLightbox ? card.photo : null} onClose={() => setShowLightbox(false)} />
+
+      {/* Header with optional photo */}
+      <div className="flex gap-4">
+        {card.photo ? (
+          <button
+            onClick={() => setShowLightbox(true)}
+            className="shrink-0 rounded overflow-hidden transition active:scale-95"
+            style={{ border: `1px solid ${COLORS.border}`, width: 80, height: 110 }}
+          >
+            <img src={card.photo} alt={card.player} className="w-full h-full object-cover" />
+          </button>
+        ) : (
+          <button
+            onClick={() => photoFileRef.current?.click()}
+            disabled={photoBusy}
+            className="shrink-0 rounded flex flex-col items-center justify-center gap-1 transition disabled:opacity-50"
+            style={{
+              border: `1px dashed ${COLORS.border}`,
+              background: COLORS.bg,
+              width: 80,
+              height: 110,
+              color: COLORS.textDim,
+            }}
+          >
+            <Camera size={18} />
+            <span className="text-[10px]" style={{ fontFamily: 'IBM Plex Sans' }}>
+              {photoBusy ? '...' : 'Add photo'}
+            </span>
+          </button>
+        )}
+        <input ref={photoFileRef} type="file" accept="image/*" capture="environment" onChange={handlePhotoChange} className="hidden" />
+
+        <div className="min-w-0 flex-1">
+          <div className="text-xs uppercase tracking-[0.2em] mb-1" style={{ color: COLORS.gold, fontFamily: 'Fraunces' }}>
+            {card.year} {card.set} {card.cardNumber && '· #' + card.cardNumber}
+          </div>
+          <div style={{ fontFamily: 'Fraunces, serif', fontSize: '24px', fontWeight: 700, color: COLORS.text, lineHeight: 1.1, letterSpacing: '-0.02em' }}>
+            {card.player}
+          </div>
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            <Pill tone="neutral" size="xs">{card.condition}</Pill>
+            {card.parallel && <Pill tone="gold" size="xs">{card.parallel}</Pill>}
+          </div>
         </div>
       </div>
+
+      {card.photo && (
+        <div className="flex gap-2 -mt-2">
+          <Button onClick={() => photoFileRef.current?.click()} variant="ghost" size="sm" disabled={photoBusy}>
+            <Camera size={12} className="inline mr-1" /> Replace photo
+          </Button>
+          <Button onClick={() => onUpdatePhoto(null)} variant="danger" size="sm">
+            <Trash2 size={12} className="inline mr-1" /> Remove photo
+          </Button>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <div className="p-3 rounded-md" style={{ background: COLORS.bg, border: `1px solid ${COLORS.borderSoft}` }}>
@@ -572,7 +882,24 @@ const CardRow = ({ card, onClick, accent }) => {
       className="w-full text-left p-3 rounded-lg transition active:scale-[0.99] hover:opacity-95"
       style={{ background: COLORS.surface, border: `1px solid ${accent ? COLORS.goldDim : COLORS.borderSoft}`, boxShadow: accent ? 'inset 0 0 0 1px rgba(212,160,76,0.08)' : 'none' }}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start gap-3">
+        {/* Thumbnail */}
+        {card.photo ? (
+          <img
+            src={card.photo}
+            alt=""
+            className="shrink-0 rounded object-cover"
+            style={{ width: 44, height: 60, border: `1px solid ${COLORS.borderSoft}` }}
+          />
+        ) : (
+          <div
+            className="shrink-0 rounded flex items-center justify-center"
+            style={{ width: 44, height: 60, background: COLORS.bg, border: `1px solid ${COLORS.borderSoft}`, color: COLORS.textMute }}
+          >
+            <ImageIcon size={16} />
+          </div>
+        )}
+
         <div className="min-w-0 flex-1">
           <div className="text-[10px] uppercase tracking-[0.18em] truncate" style={{ color: COLORS.textDim, fontFamily: 'Fraunces' }}>
             {card.year} {card.set}
@@ -658,6 +985,7 @@ export default function CardLedger() {
   const deleteCard = (id) => setCards((prev) => prev.filter((c) => c.id !== id));
   const addPricePoint = (cardId, pp) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, pricePoints: [...(c.pricePoints || []), pp] } : c)));
   const deletePricePoint = (cardId, ppId) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, pricePoints: (c.pricePoints || []).filter((p) => p.id !== ppId) } : c)));
+  const updatePhoto = (cardId, photo) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, photo } : c)));
   const loadDemo = () => setCards(buildDemoCards());
 
   return (
@@ -897,6 +1225,7 @@ export default function CardLedger() {
             onAddPricePoint={(pp) => addPricePoint(openCard.id, pp)}
             onDeletePricePoint={(ppId) => deletePricePoint(openCard.id, ppId)}
             onDeleteCard={() => deleteCard(openCard.id)}
+            onUpdatePhoto={(photo) => updatePhoto(openCard.id, photo)}
             onClose={() => setOpenCardId(null)}
           />
         )}
