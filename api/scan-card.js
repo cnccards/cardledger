@@ -1,6 +1,5 @@
 // Vercel Serverless Function: /api/scan-card
 // Uses Google Gemini (free tier) to identify sports cards from photos.
-// API key lives safely on Vercel's server, never in the browser.
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -23,7 +22,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Parse data URL: "data:image/jpeg;base64,XXXXXX"
     const match = imageDataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
     if (!match) {
       res.status(400).json({ error: 'Invalid image format' });
@@ -32,23 +30,21 @@ export default async function handler(req, res) {
     const mediaType = match[1];
     const base64Data = match[2];
 
-    const prompt = `You are a sports card identification expert. Analyze this image of a sports card and extract these details. Return ONLY a JSON object (no markdown, no code fences, no explanation), with exactly these fields:
+    const prompt = `Identify this sports card and return ONLY a JSON object with these exact fields. Do not include any explanation, markdown, or code fences. Just the raw JSON object starting with { and ending with }.
 
-{
-  "player": "full player name, or empty string if unclear",
-  "year": 2018,
-  "set": "card set/brand name like 'Topps Chrome' or 'Panini Prizm', or empty string",
-  "cardNumber": "card number as printed (the # on the card), or empty string",
-  "parallel": "parallel/insert variant if any (Refractor, Silver Prizm, etc.), or empty string",
-  "condition": "one of: Raw, PSA 10, PSA 9, PSA 8, BGS 10, BGS 9.5, BGS 9, SGC 10, SGC 9.5, CGC 10, Other. Use Raw if not in a graded slab. Look for slab labels.",
-  "confidence": "one of: high, medium, low",
-  "notes": "any extra observations like 'rookie card', 'autograph', 'numbered /99', or empty string"
-}
+Required fields:
+- player (string): full player name, or "" if unclear
+- year (number or null): 4-digit year, or null if unclear
+- set (string): card brand/set like "Topps Chrome" or "Panini Prizm", or ""
+- cardNumber (string): the # printed on the card, or ""
+- parallel (string): variant like "Refractor", "Silver Prizm", or ""
+- condition (string): one of "Raw", "PSA 10", "PSA 9", "PSA 8", "BGS 10", "BGS 9.5", "BGS 9", "SGC 10", "SGC 9.5", "CGC 10", "Other". Use "Raw" if not in a graded slab.
+- confidence (string): "high", "medium", or "low"
+- notes (string): observations like "rookie card", "autograph", "/99", or ""
 
-The "year" field must be a number (or null if unclear), all others are strings. Be conservative — if you can't read a field clearly, leave it blank rather than guessing.`;
+Be conservative — leave fields blank rather than guessing.`;
 
-    // Gemini API endpoint - using gemini-flash-latest (free tier, vision-capable)
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${apiKey}`;
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
 
     const apiResponse = await fetch(geminiUrl, {
       method: 'POST',
@@ -69,8 +65,22 @@ The "year" field must be a number (or null if unclear), all others are strings. 
         ],
         generationConfig: {
           temperature: 0.1,
-          maxOutputTokens: 500,
+          maxOutputTokens: 800,
           responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'object',
+            properties: {
+              player: { type: 'string' },
+              year: { type: 'integer', nullable: true },
+              set: { type: 'string' },
+              cardNumber: { type: 'string' },
+              parallel: { type: 'string' },
+              condition: { type: 'string' },
+              confidence: { type: 'string' },
+              notes: { type: 'string' },
+            },
+            required: ['player', 'set', 'condition', 'confidence'],
+          },
         },
       }),
     });
@@ -79,14 +89,12 @@ The "year" field must be a number (or null if unclear), all others are strings. 
       const errText = await apiResponse.text();
       console.error('Gemini API error:', apiResponse.status, errText);
       res.status(502).json({
-        error: `Gemini API returned ${apiResponse.status}. Check your API key and that it's enabled at aistudio.google.com.`,
+        error: `Gemini API returned ${apiResponse.status}. ${apiResponse.status === 503 ? 'Servers busy — try again in a moment.' : 'Check your API key at aistudio.google.com.'}`,
       });
       return;
     }
 
     const data = await apiResponse.json();
-
-    // Gemini response shape: data.candidates[0].content.parts[0].text
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
       console.error('Unexpected Gemini response:', JSON.stringify(data).slice(0, 500));
@@ -94,16 +102,37 @@ The "year" field must be a number (or null if unclear), all others are strings. 
       return;
     }
 
-    // Strip markdown fences just in case (responseMimeType should prevent these, but defensive)
-    let raw = text.trim();
-    raw = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
+    // Robust JSON extraction — try multiple strategies
+    const tryParse = (s) => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return null;
+      }
+    };
 
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      console.error('Parse failed for:', raw);
-      res.status(502).json({ error: 'Could not parse AI response as JSON' });
+    let parsed = tryParse(text.trim());
+
+    // Strategy 2: strip markdown code fences
+    if (!parsed) {
+      let cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      parsed = tryParse(cleaned);
+    }
+
+    // Strategy 3: extract substring between first { and last }
+    if (!parsed) {
+      const first = text.indexOf('{');
+      const last = text.lastIndexOf('}');
+      if (first !== -1 && last !== -1 && last > first) {
+        parsed = tryParse(text.slice(first, last + 1));
+      }
+    }
+
+    if (!parsed) {
+      console.error('Could not parse Gemini output:', text.slice(0, 500));
+      res.status(502).json({
+        error: 'AI gave an unparseable response. Try a clearer photo or scan again.',
+      });
       return;
     }
 
