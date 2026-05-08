@@ -1,6 +1,6 @@
 // Vercel Serverless Function: /api/fetch-comps
-// Searches the web (via Google Custom Search) for sales of a specific card,
-// then uses Gemini to extract prices and dates from the results.
+// Searches via Google Custom Search, then uses Gemini to extract prices.
+// Surfaces Google's actual error message so we can diagnose API issues directly.
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -12,16 +12,21 @@ export default async function handler(req, res) {
   const cseId = process.env.GOOGLE_CSE_ID;
   const geminiKey = process.env.GEMINI_API_KEY;
 
-  if (!googleKey) {
-    res.status(500).json({ error: 'Server is missing GOOGLE_API_KEY. Add it in Vercel project settings.' });
+  // Tell user explicitly which one is missing
+  if (!googleKey || googleKey.length < 10) {
+    res.status(500).json({
+      error: `GOOGLE_API_KEY in Vercel is ${!googleKey ? 'missing' : 'too short'}. Edit it in Vercel → Settings → Environment Variables, paste the key (starts with AIza...), save, and redeploy.`,
+    });
     return;
   }
-  if (!cseId) {
-    res.status(500).json({ error: 'Server is missing GOOGLE_CSE_ID. Add it in Vercel project settings.' });
+  if (!cseId || cseId.length < 5) {
+    res.status(500).json({
+      error: `GOOGLE_CSE_ID in Vercel is ${!cseId ? 'missing' : 'too short'}. Get it from programmablesearchengine.google.com.`,
+    });
     return;
   }
   if (!geminiKey) {
-    res.status(500).json({ error: 'Server is missing GEMINI_API_KEY.' });
+    res.status(500).json({ error: 'GEMINI_API_KEY in Vercel is missing.' });
     return;
   }
 
@@ -32,7 +37,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Build a focused search query
     const parts = [
       card.year,
       card.set,
@@ -44,19 +48,30 @@ export default async function handler(req, res) {
 
     const query = `${parts.join(' ')} sold`.trim();
 
-    // Google Custom Search JSON API — free tier: 100 queries/day, hard-capped (no auto-bill)
     const searchUrl = `https://www.googleapis.com/customsearch/v1?key=${googleKey}&cx=${cseId}&q=${encodeURIComponent(query)}&num=10`;
 
     const searchRes = await fetch(searchUrl);
 
     if (!searchRes.ok) {
-      const errText = await searchRes.text();
-      console.error('Google CSE error:', searchRes.status, errText);
-      let userMsg;
-      if (searchRes.status === 429) userMsg = 'Daily search limit reached (100/day). Try again tomorrow.';
-      else if (searchRes.status === 403) userMsg = 'Search API access denied. Check that Custom Search API is enabled in Google Cloud Console.';
-      else userMsg = `Search returned ${searchRes.status}. Check your Google API key and Search Engine ID.`;
-      res.status(502).json({ error: userMsg });
+      // Try to surface Google's actual error message
+      let googleMsg = `HTTP ${searchRes.status}`;
+      try {
+        const errBody = await searchRes.json();
+        if (errBody?.error?.message) {
+          googleMsg = errBody.error.message;
+        } else if (errBody?.error?.errors?.[0]?.message) {
+          googleMsg = errBody.error.errors[0].message;
+        }
+      } catch {
+        try {
+          const txt = await searchRes.text();
+          googleMsg = txt.slice(0, 300);
+        } catch {}
+      }
+      console.error('Google CSE error:', searchRes.status, googleMsg);
+      res.status(502).json({
+        error: `Google says: "${googleMsg}" (HTTP ${searchRes.status})`,
+      });
       return;
     }
 
@@ -68,7 +83,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Build context for Gemini
     const resultsText = results
       .slice(0, 10)
       .map(
@@ -146,7 +160,6 @@ Rules:
       return;
     }
 
-    // Robust parsing
     const tryParse = (s) => {
       try {
         return JSON.parse(s);
