@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from 'recharts';
-import { Plus, X, TrendingUp, TrendingDown, Trash2, Search, BarChart3, Sparkles, Activity, Database, Camera, Image as ImageIcon, Sparkle, Wand2, Loader2, AlertCircle } from 'lucide-react';
+import { Plus, X, TrendingUp, TrendingDown, Trash2, Search, BarChart3, Sparkles, Activity, Database, Camera, Image as ImageIcon, Sparkle, Wand2, Loader2, AlertCircle, Globe, Check, RefreshCw } from 'lucide-react';
 
 const STORAGE_KEY = 'cardledger:collection:v1';
 
@@ -656,13 +656,78 @@ const PhotoLightbox = ({ src, onClose }) => {
   );
 };
 
-const CardDetail = ({ card, onAddPricePoint, onDeletePricePoint, onDeleteCard, onUpdatePhoto, onClose }) => {
+const CardDetail = ({ card, onAddPricePoint, onAddPricePoints, onDeletePricePoint, onDeleteCard, onUpdatePhoto, onClose }) => {
   const m = useMemo(() => computeMetrics(card), [card]);
   const [showAdd, setShowAdd] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [showLightbox, setShowLightbox] = useState(false);
   const photoFileRef = useRef(null);
   const [photoBusy, setPhotoBusy] = useState(false);
+  // Fetch comps state
+  const [fetching, setFetching] = useState(false);
+  const [fetchedComps, setFetchedComps] = useState(null); // null | array
+  const [selectedComps, setSelectedComps] = useState({});
+  const [fetchError, setFetchError] = useState(null);
+  const [fetchInfo, setFetchInfo] = useState(null);
+
+  const runFetch = async () => {
+    setFetching(true);
+    setFetchError(null);
+    setFetchInfo(null);
+    setFetchedComps(null);
+    try {
+      const r = await fetch('/api/fetch-comps', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          card: {
+            player: card.player,
+            year: card.year,
+            set: card.set,
+            cardNumber: card.cardNumber,
+            parallel: card.parallel,
+            condition: card.condition,
+          },
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        throw new Error(data.error || 'Fetch failed');
+      }
+      const comps = data.comps || [];
+      setFetchedComps(comps);
+      // Default: select all "high" confidence comps
+      const initial = {};
+      comps.forEach((c, i) => {
+        initial[i] = c.confidence === 'high';
+      });
+      setSelectedComps(initial);
+      if (comps.length === 0) {
+        setFetchInfo(data.message || 'No matching sales found in search results.');
+      }
+    } catch (e) {
+      setFetchError(e.message || 'Could not fetch comps');
+    }
+    setFetching(false);
+  };
+
+  const acceptSelectedComps = () => {
+    if (!fetchedComps) return;
+    const toAdd = fetchedComps
+      .map((c, i) => ({ comp: c, idx: i }))
+      .filter(({ idx }) => selectedComps[idx])
+      .map(({ comp }) => ({
+        id: uid(),
+        date: comp.date,
+        price: comp.price,
+        source: 'eBay',
+      }));
+    if (toAdd.length === 0) return;
+    onAddPricePoints(toAdd);
+    setFetchedComps(null);
+    setSelectedComps({});
+    setFetchInfo(null);
+  };
 
   const chartData = useMemo(() => {
     return (card.pricePoints || [])
@@ -843,11 +908,125 @@ const CardDetail = ({ card, onAddPricePoint, onDeletePricePoint, onDeleteCard, o
         </div>
       )}
 
-      {!showAdd && (
-        <div className="flex gap-2 pt-1">
+      {!showAdd && !fetchedComps && (
+        <div className="flex gap-2 pt-1 flex-wrap">
           <Button onClick={() => setShowAdd(true)} variant="primary">
-            <Plus size={14} className="inline mr-1" /> Log new sale price
+            <Plus size={14} className="inline mr-1" /> Log price manually
           </Button>
+          <Button onClick={runFetch} variant="ghost" disabled={fetching}>
+            {fetching ? (
+              <>
+                <Loader2 size={14} className="inline mr-1 animate-spin" /> Searching eBay…
+              </>
+            ) : (
+              <>
+                <Globe size={14} className="inline mr-1" /> Fetch latest comps
+              </>
+            )}
+          </Button>
+        </div>
+      )}
+
+      {fetchError && (
+        <div
+          className="px-3 py-2 rounded text-xs flex items-start gap-2"
+          style={{ background: 'rgba(204,107,92,0.1)', border: '1px solid rgba(204,107,92,0.3)', color: COLORS.red, fontFamily: 'IBM Plex Sans' }}
+        >
+          <AlertCircle size={12} style={{ marginTop: 2, flexShrink: 0 }} />
+          <span>{fetchError}</span>
+        </div>
+      )}
+
+      {fetchedComps && fetchedComps.length === 0 && (
+        <div
+          className="px-3 py-3 rounded text-xs"
+          style={{ background: COLORS.bg, border: `1px solid ${COLORS.borderSoft}`, color: COLORS.textDim, fontFamily: 'IBM Plex Sans' }}
+        >
+          {fetchInfo || 'No recent sold comps found for this card.'} Try logging one manually.
+          <div className="mt-2">
+            <Button onClick={() => setFetchedComps(null)} variant="ghost" size="sm">Close</Button>
+          </div>
+        </div>
+      )}
+
+      {fetchedComps && fetchedComps.length > 0 && (
+        <div className="p-3 rounded-md space-y-2" style={{ background: COLORS.bg, border: `1px solid ${COLORS.gold}` }}>
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-[0.2em]" style={{ color: COLORS.gold, fontFamily: 'Fraunces', fontWeight: 600 }}>
+              Found {fetchedComps.length} comp{fetchedComps.length === 1 ? '' : 's'}
+            </div>
+            <button onClick={() => setFetchedComps(null)} style={{ color: COLORS.textDim }} className="p-1">
+              <X size={14} />
+            </button>
+          </div>
+          <div className="text-[11px]" style={{ color: COLORS.textDim, fontFamily: 'IBM Plex Sans', lineHeight: 1.4 }}>
+            Tap a row to toggle. Review carefully — AI matching isn't perfect. High-confidence comps are pre-selected.
+          </div>
+          <div className="space-y-1.5">
+            {fetchedComps.map((c, i) => {
+              const selected = !!selectedComps[i];
+              const confColor =
+                c.confidence === 'high' ? COLORS.green : c.confidence === 'low' ? COLORS.red : COLORS.gold;
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => setSelectedComps((s) => ({ ...s, [i]: !s[i] }))}
+                  className="w-full text-left px-3 py-2 rounded transition active:scale-[0.99]"
+                  style={{
+                    background: selected ? 'rgba(212,160,76,0.08)' : COLORS.surface,
+                    border: `1px solid ${selected ? COLORS.gold : COLORS.borderSoft}`,
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="w-4 h-4 rounded flex items-center justify-center shrink-0"
+                          style={{
+                            background: selected ? COLORS.gold : 'transparent',
+                            border: `1px solid ${selected ? COLORS.gold : COLORS.border}`,
+                            color: COLORS.ink,
+                          }}
+                        >
+                          {selected && <Check size={11} strokeWidth={3} />}
+                        </div>
+                        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 14, fontWeight: 600, color: COLORS.text }}>
+                          {fmtMoney(c.price)}
+                        </span>
+                        <span className="text-[10px]" style={{ color: confColor, fontFamily: 'JetBrains Mono', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                          {c.confidence}
+                        </span>
+                      </div>
+                      {c.title && (
+                        <div className="text-[11px] mt-1 line-clamp-2" style={{ color: COLORS.textDim, fontFamily: 'IBM Plex Sans', lineHeight: 1.3 }}>
+                          {c.title}
+                        </div>
+                      )}
+                      <div className="text-[10px] mt-1" style={{ color: COLORS.textMute, fontFamily: 'JetBrains Mono' }}>
+                        {fmtDate(c.date)}
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex gap-2 pt-1">
+            <Button
+              onClick={acceptSelectedComps}
+              variant="primary"
+              size="sm"
+              disabled={Object.values(selectedComps).filter(Boolean).length === 0}
+            >
+              <Plus size={12} className="inline mr-1" />
+              Add {Object.values(selectedComps).filter(Boolean).length} to history
+            </Button>
+            <Button onClick={() => setFetchedComps(null)} variant="ghost" size="sm">Cancel</Button>
+            <Button onClick={runFetch} variant="ghost" size="sm" disabled={fetching}>
+              <RefreshCw size={12} className="inline mr-1" /> Retry
+            </Button>
+          </div>
         </div>
       )}
 
@@ -984,6 +1163,7 @@ export default function CardLedger() {
   const addCard = (card) => setCards((prev) => [...prev, card]);
   const deleteCard = (id) => setCards((prev) => prev.filter((c) => c.id !== id));
   const addPricePoint = (cardId, pp) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, pricePoints: [...(c.pricePoints || []), pp] } : c)));
+  const addPricePoints = (cardId, pps) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, pricePoints: [...(c.pricePoints || []), ...pps] } : c)));
   const deletePricePoint = (cardId, ppId) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, pricePoints: (c.pricePoints || []).filter((p) => p.id !== ppId) } : c)));
   const updatePhoto = (cardId, photo) => setCards((prev) => prev.map((c) => (c.id === cardId ? { ...c, photo } : c)));
   const loadDemo = () => setCards(buildDemoCards());
@@ -1223,6 +1403,7 @@ export default function CardLedger() {
           <CardDetail
             card={openCard}
             onAddPricePoint={(pp) => addPricePoint(openCard.id, pp)}
+            onAddPricePoints={(pps) => addPricePoints(openCard.id, pps)}
             onDeletePricePoint={(ppId) => deletePricePoint(openCard.id, ppId)}
             onDeleteCard={() => deleteCard(openCard.id)}
             onUpdatePhoto={(photo) => updatePhoto(openCard.id, photo)}
